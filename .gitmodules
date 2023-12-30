@@ -1,0 +1,9 @@
+[submodule "libs/zt"]
+	path = libs/zt
+	url = https://github.com/JonSnowbd/ZT.git
+[submodule "libs/native_file_dialog"]
+	path = libs/native_file_dialog
+	url = https://github.com/btzy/nativefiledialog-extended.git
+[submodule "libs/zig-gamedev"]
+	path = libs/zig-gamedev
+	url = https://github.com/michal-z/zig-gamedev.git
