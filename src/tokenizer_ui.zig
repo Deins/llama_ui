@@ -1,34 +1,27 @@
 const std = @import("std");
-const ig = @import("imgui");
+const ig = @import("ig.zig");
 const llama = @import("llama");
 
 const Self = @This();
 
-/// NOTE: 0 terminated
 input: std.ArrayList(u8),
 tokenizer: llama.Tokenizer,
-//detokenizer: llama.Detokenizer,
 // tokenization params
 add_bos: bool = false,
 special: bool = true,
 
 pub fn init(alloc: std.mem.Allocator) !Self {
     var s: Self = .{
-        .input = try std.ArrayList(u8).initCapacity(alloc, 512),
+        .input = std.ArrayList(u8).init(alloc),
         .tokenizer = llama.Tokenizer.init(alloc),
     };
-    try s.input.append(0);
+    //try s.input.append(0);
     return s;
 }
 
 pub fn deinit(self: *Self) void {
     self.input.deinit();
     self.tokenizer.deinit();
-}
-
-/// returns input slice without 0 terminator
-pub fn slice(self: Self) [:0]u8 {
-    return @ptrCast(self.input.items.ptr[0 .. self.input.items.len - 1]);
 }
 
 pub fn render(self: *Self, model: *llama.Model) !void {
@@ -39,20 +32,17 @@ pub fn render(self: *Self, model: *llama.Model) !void {
     const flags = ig.ImGuiInputTextFlags_CallbackResize | ig.ImGuiInputTextFlags_AllowTabInput | ig.ImGuiInputTextFlags_Multiline;
     ig.igPushItemWidth(-1);
 
-    if (ig.igInputTextEx("##input", "Input text to tokenize here...", self.input.items.ptr, @intCast(self.input.capacity), .{}, flags, @ptrCast(&inputResizeCB), self)) {
+    if (try ig.inputTextArrayList("##input", "Input text to tokenize here...", &self.input, flags))
         refresh = true;
-        self.input.items = self.input.items[0 .. std.mem.indexOf(u8, self.input.items.ptr[0..self.input.capacity], "\x00").? + 1];
-    }
+
     ig.igPopItemWidth();
     if (refresh) {
         self.tokenizer.clearRetainingCapacity();
-        try self.tokenizer.tokenize(model, self.slice(), self.add_bos, self.special);
-        //self.detokenizer.clearRetainingCapacity();
-        //try self.detokenizer.detokenize()
+        try self.tokenizer.tokenize(model, self.input.items, self.add_bos, self.special);
     }
 
     // Draw output
-    ig.igText("Input len: %d; Tokens: %d", self.slice().len, self.tokenizer.data.items.len);
+    ig.igText("Input len: %d; Tokens: %d", self.input.items.len, self.tokenizer.data.items.len);
     // if (self.tokenizer.data.items.len > 1)
     {
         if (ig.igBeginTable("tokenizer", 5, ig.ImGuiTableFlags_Borders | ig.ImGuiTableFlags_SizingFixedFit, .{}, 0)) {
@@ -101,16 +91,4 @@ pub fn render(self: *Self, model: *llama.Model) !void {
             ig.igEndTable();
         }
     }
-}
-
-fn inputResizeCB(data: *ig.ImGuiInputTextCallbackData) callconv(.C) c_int {
-    const self: *Self = @ptrCast(@alignCast(data.UserData));
-    if (data.EventFlag == ig.ImGuiInputTextFlags_CallbackResize) {
-        self.input.resize(@intCast(data.BufSize)) catch {
-            data.BufTextLen = @intCast(self.input.capacity - 1); // Text length (in bytes)               // Read-write   // [Resize,Completion,History,Always] Exclude zero-terminator storage. In C land: == strlen(some_text), in C++ land: string.length()
-            data.BufSize = @intCast(self.input.capacity); // Buffer size (in bytes) = capacity+1  // Read-only    // [Resize,Completion,History,Always] Include zero-terminator storage. In C land == ARRAYSIZE(my_char_array), in C++ land: string.capacity(+1)
-        };
-        data.Buf = self.input.items.ptr; // Text buffer                          // Read-write   // [Resize] Can replace pointer / [Completion,History,Always] Only write to pointed data, don't replace the actual pointer!
-    }
-    return 0;
 }
