@@ -1,0 +1,41 @@
+[Window][DockSpace]
+Pos=0,0
+Size=1280,720
+Collapsed=0
+
+[Window][Debug##Default]
+Pos=60,60
+Size=400,400
+Collapsed=0
+
+[Window][Config]
+Pos=940,8
+Size=332,704
+Collapsed=0
+DockId=0x00000002,0
+
+[Window][Prompt history]
+Pos=8,8
+Size=930,524
+Collapsed=0
+DockId=0x00000003,0
+
+[Window][Tokenizer tool]
+Pos=8,534
+Size=930,178
+Collapsed=0
+DockId=0x00000004,1
+
+[Window][Prompt input]
+Pos=8,534
+Size=930,178
+Collapsed=0
+DockId=0x00000004,0
+
+[Docking][Data]
+DockSpace     ID=0x09EF459F Window=0x9A404470 Pos=8,8 Size=1264,704 Split=X
+  DockNode    ID=0x00000001 Parent=0x09EF459F SizeRef=930,704 Split=Y
+    DockNode  ID=0x00000003 Parent=0x00000001 SizeRef=1264,524 Selected=0x83B0ECFD
+    DockNode  ID=0x00000004 Parent=0x00000001 SizeRef=1264,178 CentralNode=1 Selected=0x1AB49DC2
+  DockNode    ID=0x00000002 Parent=0x09EF459F SizeRef=332,704 Selected=0x94B17C7D
+

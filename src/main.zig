@@ -6,6 +6,7 @@ const llama = @import("llama");
 const slog = std.log.scoped(.main);
 const TokUi = @import("tokenizer_ui.zig");
 const Atomic = std.atomic.Atomic;
+const PromptUi = @import("prompt_ui.zig");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -81,26 +82,17 @@ pub const ModelRuntime = struct {
     model: ?*llama.Model = null,
     model_ctx: ?*llama.Context = null,
     tok_ui: TokUi,
-    history_tokens: usize = 0,
-    history: std.ArrayList(u8),
-    role: std.ArrayList(u8),
-    input: std.ArrayList(u8),
-    input_special: bool = true,
-    input_templated: bool = true,
+    prompt_ui: PromptUi,
     gen_state: Atomic(WorkerState) = .{ .value = .stopped },
     prompt: ?llama.Prompt = null,
 
     pub fn init(alloc: std.mem.Allocator) !@This() {
-        var role = std.ArrayList(u8).init(alloc);
-        try role.appendSlice("system");
         return .{
             .alloc = alloc,
             .mparams = llama.Model.defaultParams(),
             .cparams = llama.Context.defaultParams(),
             .tok_ui = try TokUi.init(alloc),
-            .history = std.ArrayList(u8).init(alloc),
-            .input = std.ArrayList(u8).init(alloc),
-            .role = role,
+            .prompt_ui = try PromptUi.init(alloc),
         };
     }
 
@@ -108,9 +100,7 @@ pub const ModelRuntime = struct {
         if (self.gen_state.swap(.stopping, .Release) != .stopped) {
             while (self.gen_state.load(.Monotonic) != .stopped) std.Thread.yield() catch std.atomic.spinLoopHint();
         }
-        self.history.deinit();
-        self.input.deinit();
-        self.role.deinit();
+        self.prompt_ui.deinit();
         self.tok_ui.deinit();
         self.loader.deinit();
         if (self.prompt) |*p| p.deinit();
@@ -156,17 +146,11 @@ pub const ModelRuntime = struct {
                 if (done) try self.switchStateTo(.unloaded);
             },
             .generating => {
-                const prompt = &self.prompt.?;
-                prompt.tokens_mutex.lock();
-                defer prompt.tokens_mutex.unlock();
-                if (prompt.tokens.items.len != self.history_tokens) {
-                    self.history.clearRetainingCapacity();
-                    var dtok = llama.Detokenizer{ .data = self.history };
-                    defer self.history = dtok.data;
-
-                    if (self.prompt) |p| {
-                        for (p.tokens.items) |tok| _ = try dtok.detokenizeWithSpecial(self.model.?, tok);
-                    }
+                {
+                    const prompt = &self.prompt.?;
+                    prompt.tokens_mutex.lock();
+                    defer prompt.tokens_mutex.unlock();
+                    try self.prompt_ui.updateHistory(self);
                 }
                 if (self.gen_state.load(.Acquire) == .stopped) try self.switchStateTo(.ready);
             },
@@ -296,7 +280,7 @@ pub fn renderTick(context: *LlamaApp.Context) !void {
         }
 
         try @import("config_ui.zig").configWindow(context);
-        try @import("prompt_ui.zig").promptUi(context);
+        try mrt.prompt_ui.draw(context);
 
         if (ig.igBegin("Tokenizer tool", null, ig.ImGuiWindowFlags_NoFocusOnAppearing)) {
             if (mrt.model) |m| try mrt.tok_ui.render(m) else ig.text("Model not loaded.");
