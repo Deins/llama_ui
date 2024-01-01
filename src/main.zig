@@ -6,100 +6,108 @@ const builtin = @import("builtin");
 const llama = @import("llama");
 const slog = std.log.scoped(.main);
 const TokUi = @import("tokenizer_ui.zig");
+const Atomic = std.atomic.Atomic;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
 /// Loader responsible of loading model on a separate thread
 pub const Loader = struct {
     const Self = @This();
-    pub const State = enum { failed, cancel, loading, finished };
+    pub const State = enum(u32) { failed, loading, finished };
 
-    state: State = .cancel,
+    state: Atomic(State) = .{ .value = .finished },
+    result: Atomic(?*llama.Model) = .{ .value = null },
+    cancel: Atomic(bool) = .{ .value = false },
     progress: f32 = 0,
-    thread: ?std.Thread = null,
-    result: ?*llama.Model = null,
     load_time: u64 = 0,
-    // /// loader thread dumps all its data as soon as it is able to, instead of writing deatach
-    // readonly_self_destruct: bool = false,
 
     pub const reset = deinit;
 
     pub fn deinit(self: *Self) void {
-        if (self.thread) |t| {
-            slog.info("loader - joining", .{});
-            defer slog.info("loader - joined", .{});
-            switch (self.getState()) {
-                .failed, .cancel, .finished => {},
-                .loading => @atomicStore(State, &self.state, .cancel, .Release),
-            }
-            t.join();
-        }
-        if (@atomicRmw(?*llama.Model, &self.result, .Xchg, null, .SeqCst)) |m| m.deinit();
-        self.thread = null;
-    }
-
-    pub fn getProgress(self: *Self) f32 {
-        return @atomicLoad(f32, self.progress, .Acquire);
-    }
-
-    pub fn getState(self: *Self) State {
-        return @atomicLoad(State, &self.state, .Acquire);
+        if (self.result.swap(null, .AcqRel)) |m| m.deinit();
     }
 
     fn progressCB(p: f32, ctx: ?*anyopaque) callconv(.C) bool {
         const self: *Self = @ptrCast(@alignCast(ctx));
         @atomicStore(f32, &self.progress, p, .Release);
-        return @atomicLoad(State, &self.state, .Acquire) == .loading;
+        return !self.cancel.load(.Acquire);
     }
 
-    fn doLoad(self: *Self, params: llama.Model.Params, path: [:0]const u8) void {
-        var timer = std.time.Timer.start() catch unreachable;
+    fn doLoad(self: *Self, params_: llama.Model.Params, path: [:0]const u8) void {
         defer gpa.allocator().free(path);
-        @atomicStore(State, &self.state, .loading, .Release);
+        std.debug.assert(self.state.load(.Acquire) == .loading);
         _ = progressCB(0, @ptrCast(self));
+        var params = params_;
+        params.progress_callback = &Self.progressCB;
+        params.progress_callback_user_data = self;
+
+        var timer = std.time.Timer.start() catch unreachable;
         const model = llama.Model.initFromFile(path, params) catch {
+            if (self.cancel.load(.Acquire)) slog.err("Model load stopped - canceled. {s}", .{path}) else slog.err("Failed to loade model: '{s}'", .{path});
             _ = progressCB(-1, @ptrCast(self));
-            @atomicStore(State, &self.state, .failed, .Release);
-            slog.err("Failed to loade model: '{s}'", .{path});
+            self.state.store(.failed, .Release);
             return;
         };
-        @atomicStore(?*llama.Model, &self.result, model, .Release);
-        @atomicStore(State, &self.state, .finished, .Release);
         self.load_time = timer.read();
+
+        self.result.store(model, .SeqCst);
+        self.state.store(.finished, .SeqCst);
         slog.info("model loaded: '{s}' in ", .{std.fmt.fmtDuration(self.load_time)});
     }
 };
 
-/// AppData will be available through the context anywhere.
-const LlamaAppData = struct {
+pub const ModelRuntime = struct {
+    pub const State = enum {
+        unloaded,
+        loading,
+        ready,
+        unloading,
+        generating,
+    };
+
     alloc: std.mem.Allocator = gpa.allocator(),
+    /// currennt state of worker
+    state: State = .unloaded,
+    /// next required action
+    next_state: ?State = null,
     model_path: ?[:0]const u8 = null,
     mparams: llama.Model.Params = .{},
     cparams: llama.Context.Params = .{},
     loader: Loader = .{},
     model: ?*llama.Model = null,
     model_ctx: ?*llama.Context = null,
+    tok_ui: TokUi,
     prompt: ?llama.Prompt = null,
-    /// just counts rendered frames
-    frame: usize = 0,
-    tok_ui: TokUi = undefined,
+    history: std.ArrayList(u8),
+    role: std.ArrayList(u8),
+    input: std.ArrayList(u8),
+    input_special: bool = true,
+    input_templated: bool = true,
 
     pub fn init(alloc: std.mem.Allocator) !@This() {
+        var role = std.ArrayList(u8).init(alloc);
+        try role.appendSlice("system");
         return .{
             .alloc = alloc,
             .mparams = llama.Model.defaultParams(),
             .cparams = llama.Context.defaultParams(),
             .tok_ui = try TokUi.init(alloc),
+            .history = std.ArrayList(u8).init(alloc),
+            .input = std.ArrayList(u8).init(alloc),
+            .role = role,
         };
     }
 
     pub fn deinit(self: *@This()) void {
+        self.history.deinit();
+        self.input.deinit();
+        self.role.deinit();
+        self.tok_ui.deinit();
+        self.loader.deinit();
         if (self.prompt) |*p| p.deinit();
         if (self.model_ctx) |mc| mc.deinit();
         if (self.model) |m| m.deinit();
         if (self.model_path) |pth| self.alloc.free(pth);
-        self.tok_ui.deinit();
-        self.loader.deinit();
     }
 
     /// due to model or other changes model needs reload
@@ -107,27 +115,79 @@ const LlamaAppData = struct {
         self.reload(null) catch unreachable;
     }
 
-    /// must be called during loading to grab loaded model and prepare context
-    pub fn grabAndPrepModel(self: *@This()) !void {
-        std.debug.assert(self.model == null);
-        if (self.loader.getState() == .finished) {
-            self.model = @atomicRmw(?*llama.Model, &self.loader.result, .Xchg, null, .SeqCst).?;
-            self.loader.result = null;
-            self.loader.deinit();
-
-            self.model_ctx = try llama.Context.initWithModel(self.model.?, self.cparams);
-            self.prompt = try llama.Prompt.init(gpa.allocator(), .{
-                .model = self.model.?,
-                .ctx = self.model_ctx.?,
-                .batch_size = self.cparams.n_batch,
-            });
+    pub fn updateState(self: *@This()) !void {
+        switch (self.state) {
+            .unloaded => if (self.next_state) |ns| {
+                self.state = ns;
+            },
+            .loading => {
+                const lstate = self.loader.state.load(.SeqCst);
+                self.model = self.loader.result.swap(null, .SeqCst);
+                if (self.model) |model| {
+                    self.model_ctx = try llama.Context.initWithModel(model, self.cparams);
+                    self.prompt = try llama.Prompt.init(gpa.allocator(), .{
+                        .model = self.model.?,
+                        .ctx = self.model_ctx.?,
+                        .batch_size = self.cparams.n_batch,
+                    });
+                    if (!try self.nextState()) try self.switchStateTo(.ready);
+                } else if (lstate != .loading) {
+                    if (!try self.nextState()) try self.switchStateTo(.ready);
+                }
+            },
+            .ready => {},
+            .unloading => {
+                const model = self.loader.result.swap(null, .SeqCst);
+                var done = self.loader.state.load(.Acquire) != .loading;
+                if (model) |m| {
+                    m.deinit();
+                    done = true;
+                }
+                if (done) if (!try self.nextState()) try self.switchStateTo(.unloaded);
+            },
+            .generating => {},
         }
+    }
+
+    pub fn nextState(self: *@This()) !bool {
+        defer self.next_state = null;
+        if (self.next_state) |s| {
+            try switchStateTo(self, s);
+            return true;
+        }
+        return false;
+    }
+
+    pub fn switchStateTo(self: *@This(), state: State) !void {
+        std.log.debug("switchStateTo {} from {}", .{ state, self.state });
+        switch (state) {
+            .loading => {
+                if (self.loader.result.load(.Acquire)) |m| {
+                    m.deinit();
+                    self.loader.result.store(null, .Release);
+                }
+                if (self.model_path) |path| {
+                    self.loader.state.store(.loading, .Release);
+                    self.loader.cancel.store(false, .Release);
+                    self.loader.progress = 0;
+                    const thread = try std.Thread.spawn(.{}, Loader.doLoad, .{ &self.loader, self.mparams, try self.alloc.dupeZ(u8, path) });
+                    thread.setName("LoaderThread") catch {};
+                } else {
+                    slog.info("Can't load - missing model path!", .{});
+                    self.state = .unloaded;
+                    return;
+                }
+            },
+            .unloading => self.loader.cancel.store(true, .Release),
+            .unloaded, .ready, .generating => {},
+        }
+        self.state = state;
     }
 
     /// load/reload model from path
     /// @param path path to model or null to unload current
     pub fn reload(self: *@This(), path: ?[:0]const u8) !void {
-        self.loader.deinit();
+        _ = path;
         if (self.prompt) |*p| {
             // TODO: keep text, reembed after reloading?
             p.deinit();
@@ -141,30 +201,31 @@ const LlamaAppData = struct {
             m.deinit();
             self.model = null;
         }
-        if (path == null) {
-            self.loader.state = .cancel;
-            slog.info("unloaded model", .{});
-            return;
+        if (self.loader.state.load(.SeqCst) == .loading or self.loader.result.load(.SeqCst) != null) {
+            slog.info("reload - unloading", .{});
+            try self.switchStateTo(.unloading);
+            self.next_state = .loading;
+        } else {
+            slog.info("reload - loading", .{});
+            try self.switchStateTo(.loading);
+            self.next_state = null;
         }
-        slog.info("reloading model: '{s}'", .{self.model_path.?});
-
-        @atomicStore(Loader.State, &self.loader.state, .loading, .Release);
-        self.loader.progress = 0;
-
-        var mparams = self.mparams;
-        mparams.progress_callback = &Loader.progressCB;
-        mparams.progress_callback_user_data = &self.loader;
-        self.loader.thread = try std.Thread.spawn(.{}, Loader.doLoad, .{ &self.loader, mparams, try gpa.allocator().dupeZ(u8, path.?) });
-        self.loader.thread.?.setName("LoaderThread") catch unreachable;
     }
 };
 
-const LlamaApp = zt.App(LlamaAppData);
+/// AppData will be available through the context anywhere.
+const ContextData = struct {
+    /// just counts rendered frames
+    frame: usize = 0,
+    mrt: ?ModelRuntime = null,
+};
+
+const LlamaApp = zt.App(ContextData);
 
 pub fn renderTick(context: *LlamaApp.Context) !void {
-    const cdata: *LlamaAppData = &context.data; // context data
+    const mrt: *ModelRuntime = &context.data.mrt.?; // context data
     const first_time = context.data.frame == 0;
-    if (cdata.model == null) try cdata.grabAndPrepModel();
+    try mrt.updateState();
 
     { // Create root window filling entire screen
         const viewport = ig.igGetMainViewport();
@@ -195,7 +256,7 @@ pub fn renderTick(context: *LlamaApp.Context) !void {
         try promptWindow(context);
 
         if (ig.igBegin("Tokenizer tool", null, ig.ImGuiWindowFlags_None)) {
-            if (cdata.model) |m| try cdata.tok_ui.render(m) else ig.text("Model not loaded.");
+            if (mrt.model) |m| try mrt.tok_ui.render(m) else ig.text("Model not loaded.");
         }
         ig.igEnd();
 
@@ -203,39 +264,61 @@ pub fn renderTick(context: *LlamaApp.Context) !void {
     }
 }
 
-var prompt_text: [512:0]u8 = undefined;
 pub fn promptWindow(context: *LlamaApp.Context) !void {
-    const cdata = &context.data;
-    // TODO: temporary, we should not detokenize every frame
-    var dtok = llama.Detokenizer.init(gpa.allocator());
-    defer dtok.deinit();
-    if (cdata.prompt) |p| {
-        for (p.tokens.items) |tok| _ = try dtok.detokenizeWithSpecial(cdata.model.?, tok);
-    }
+    const mrt = &context.data.mrt.?;
+    var mod = false;
 
     if (ig.igBegin("Prompt history", null, ig.ImGuiWindowFlags_None)) {
         ig.text("History");
         var tmp: [512]u8 = undefined;
         _ = tmp;
         ig.igPushItemWidth(-1);
-        _ = ig.igInputTextMultiline("prompt_history", &prompt_text, prompt_text.len, .{}, ig.ImGuiInputTextFlags_ReadOnly, null, null);
+        if (try ig.inputTextArrayList("##prompt_history", "", &mrt.history, ig.ImGuiInputTextFlags_ReadOnly | ig.ImGuiInputTextFlags_Multiline)) {}
         ig.igPopItemWidth();
     }
     ig.igEnd();
 
     if (ig.igBegin("Prompt input", null, ig.ImGuiWindowFlags_None)) {
-        var tmp: [512]u8 = undefined;
-        _ = tmp;
+        _ = ig.igCheckbox("special tokens", &mrt.input_special);
+        ig.igSameLine(0, -1);
+        _ = ig.igCheckbox("templated", &mrt.input_templated);
+        if (mrt.input_templated) {
+            ig.igSameLine(0, -1);
+            ig.igPushItemWidth(150);
+            defer ig.igPopItemWidth();
+            _ = try ig.inputTextArrayList("role", "role", &mrt.role, ig.ImGuiInputTextFlags_None);
+        }
+
         ig.igPushItemWidth(-1);
-        _ = ig.igInputTextMultiline("prompt_history", &prompt_text, prompt_text.len, .{}, ig.ImGuiInputTextFlags_ReadOnly, null, null);
-        ig.igPopItemWidth();
+        defer ig.igPopItemWidth();
+        const input = &mrt.input;
+        try input.ensureTotalCapacity(input.items.len + 1);
+        input.allocatedSlice()[input.items.len] = 0; // ensure 0 termination
+        const flags = ig.ImGuiInputTextFlags_Multiline | ig.ImGuiInputTextFlags_EnterReturnsTrue;
+        if (try ig.inputTextArrayList("##prompt_input", "Prompt input", input, flags)) {
+            if (mrt.prompt) |*prompt| {
+                try prompt.appendText(input.items, true);
+                input.clearRetainingCapacity();
+                mod = true;
+            }
+        }
     }
     ig.igEnd();
+
+    if (mod) {
+        mrt.history.clearRetainingCapacity();
+        var dtok = llama.Detokenizer{ .data = mrt.history };
+        defer mrt.history = dtok.data;
+
+        if (mrt.prompt) |p| {
+            for (p.tokens.items) |tok| _ = try dtok.detokenizeWithSpecial(mrt.model.?, tok);
+        }
+    }
     //igText("Input");
 }
 
 pub fn configWindow(context: *LlamaApp.Context) !void {
-    const cdata: *LlamaAppData = &context.data; // context data
+    const mrt: *ModelRuntime = &context.data.mrt.?; // context data
     var tmp: [512]u8 = undefined;
     ig.igSetNextWindowSizeConstraints(.{ .x = 300, .y = 128 }, .{ .x = 9999999, .y = 9999999 }, null, null);
     if (ig.igBegin("Config", null, ig.ImGuiWindowFlags_NoFocusOnAppearing)) {
@@ -252,26 +335,26 @@ pub fn configWindow(context: *LlamaApp.Context) !void {
             const res = nfd.NFD_OpenDialogU8(&out_path, &filter, filter.len, null);
             defer if (out_path != null) nfd.NFD_FreePathU8(out_path);
             if (res == nfd.NFD_OKAY) {
-                if (context.data.model_path) |path| gpa.allocator().free(path);
-                cdata.model_path = try gpa.allocator().dupeZ(u8, std.mem.span(out_path.?));
-                try cdata.reload(cdata.model_path.?);
-            } else if (res == nfd.NFD_CANCEL) {} else std.log.warn("File dialog error: {}", .{res});
+                if (mrt.model_path) |path| mrt.alloc.free(path);
+                mrt.model_path = try mrt.alloc.dupeZ(u8, std.mem.span(out_path.?));
+                try mrt.reload(mrt.model_path.?);
+            } else if (res == nfd.NFD_CANCEL) {} else std.log.err("File dialog returned error: '{s}' ({})", .{ nfd.NFD_GetError(), res });
         }
         ig.igSameLine(0, 8);
-        var model: [:0]const u8 = cdata.model_path orelse "<none>";
+        var model: [:0]const u8 = mrt.model_path orelse "<none>";
         if (std.mem.lastIndexOf(u8, model, if (builtin.target.os.tag == .windows) "\\" else "//")) |idx| model = model[idx + 1 ..];
         ig.text(model);
         const start_y = ig.igGetCursorPosY();
-        switch (cdata.loader.getState()) {
+        switch (mrt.state) {
             .loading => {
-                const p = cdata.loader.progress;
+                const p = mrt.loader.progress;
                 if (p <= 0) {
                     // due to mmap & stuff initial progress doesn't update which takes longest, better display spinner/text
                     const texts = [_][:0]const u8{ "Loading.   ", "Loading..  ", "Loading..." };
                     const text = texts[@as(usize, @intFromFloat(context.time.lifetime * 2)) % texts.len];
                     ig.text(text);
                     ig.igSameLine(90, 0);
-                    ig.spinner("loading", ig.igGetTextLineHeight() * 0.45, 2, 0xFFFFFFAA);
+                    ig.spinner("##loading_spinner", ig.igGetTextLineHeight() * 0.45, 2, 0xFFFFFFAA);
                     context.setAnimationFrames(0.05);
                 } else {
                     ig.igSetCursorPosX(64);
@@ -281,33 +364,46 @@ pub fn configWindow(context: *LlamaApp.Context) !void {
                     context.setAnimationFrames(0.05);
                 }
             },
-            .cancel => {
-                ig.igTextColored(.{ .x = 1.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "Model not loaded!");
-                if (cdata.model_path) |path| {
-                    ig.igSameLine(0, 8);
-                    var sa: ig.ImVec2 = .{};
-                    ig.igGetContentRegionAvail(&sa);
-                    if (ig.igButton("RELOAD", .{ .x = sa.x })) try cdata.reload(path);
+            .unloading => {
+                ig.igTextColored(.{ .x = 1.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "Unloading...");
+                ig.igSameLine(100, 0);
+                context.setAnimationFrames(0.05);
+                ig.spinner("##loading_spinner", ig.igGetTextLineHeight() * 0.45, 2, 0xFFFFFFAA);
+            },
+            .unloaded => {
+                if (mrt.loader.state.load(.Acquire) == .failed) {
+                    ig.igTextColored(.{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 }, "Model failed to load!");
+                } else {
+                    ig.igTextColored(.{ .x = 1.0, .y = 1.0, .z = 0.0, .w = 1.0 }, "Model not loaded!");
+                    if (mrt.model_path) |path| {
+                        ig.igSameLine(0, 8);
+                        var sa: ig.ImVec2 = .{};
+                        ig.igGetContentRegionAvail(&sa);
+                        if (ig.igButton("RELOAD", .{ .x = sa.x })) try mrt.reload(path);
+                    }
                 }
             },
-            .failed => ig.igTextColored(.{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 }, "Model failed to load!"),
-            .finished => {
-                ig.igTextColored(.{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 }, @ptrCast(try std.fmt.bufPrint(tmp[0..], "Model loaded! ({})\x00", .{std.fmt.fmtDuration(cdata.loader.load_time)})));
+            .ready => {
+                ig.igTextColored(.{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 }, @ptrCast(try std.fmt.bufPrint(tmp[0..], "Model loaded! ({})\x00", .{std.fmt.fmtDuration(mrt.loader.load_time)})));
+                if (mrt.state != .loading) {} else {}
+            },
+            .generating => {
+                ig.igTextColored(.{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 }, @ptrCast(try std.fmt.bufPrint(tmp[0..], "Generating\x00", .{})));
             },
         }
         ig.igSetCursorPosY(start_y + ig.igGetStyle().*.FramePadding.y * 2 + ig.GImGui.*.FontSize + 2);
 
-        if (ig.igInputInt("gpu_layers", &cdata.mparams.n_gpu_layers, 4, 32, ig.ImGuiSliderFlags_None)) {
-            cdata.mparams.n_gpu_layers = @max(0, cdata.mparams.n_gpu_layers);
-            cdata.invalidate();
+        if (ig.igInputInt("gpu_layers", &mrt.mparams.n_gpu_layers, 4, 32, ig.ImGuiSliderFlags_None)) {
+            mrt.mparams.n_gpu_layers = @max(0, mrt.mparams.n_gpu_layers);
+            mrt.invalidate();
         }
 
-        if (ig.igCheckbox("use mmap", &cdata.mparams.use_mmap)) cdata.invalidate();
+        if (ig.igCheckbox("use mmap", &mrt.mparams.use_mmap)) {} //mrt.invalidate();
         ig.igSameLine(0, 16);
-        if (ig.igCheckbox("use mlock", &cdata.mparams.use_mlock)) cdata.invalidate();
+        if (ig.igCheckbox("use mlock", &mrt.mparams.use_mlock)) mrt.invalidate();
 
         if (ig.igCollapsingHeader_BoolPtr("Model info", null, ig.ImGuiTreeNodeFlags_None)) {
-            if (cdata.model) |m| {
+            if (mrt.model) |m| {
                 ig.labelFmt("Description", m.desc(&tmp), "{s}");
                 ig.label("Vocab lenght", m.nVocab());
                 ig.label("Trained context lenght", m.nCtxTrain());
@@ -326,7 +422,7 @@ pub fn configWindow(context: *LlamaApp.Context) !void {
         }
 
         if (ig.igCollapsingHeader_BoolPtr("Context config", null, ig.ImGuiTreeNodeFlags_DefaultOpen)) {
-            const p = &cdata.cparams;
+            const p = &mrt.cparams;
             var mod = false;
             _ = (ig.inputScalar(u32, "seed", &p.seed));
             if (ig.inputScalar(u32, "n_ctx", &p.n_ctx)) mod = true;
@@ -351,6 +447,9 @@ pub fn configWindow(context: *LlamaApp.Context) !void {
 
             // TODO: if (mod) something something
         }
+        if (ig.igCollapsingHeader_BoolPtr("App config", null, ig.ImGuiTreeNodeFlags_DefaultOpen)) {
+            ig.text(@tagName(mrt.state));
+        }
     }
     ig.igEnd();
 }
@@ -371,7 +470,7 @@ pub fn main() !void {
     context.setWindowSize(1280, 720);
     context.setWindowTitle("llama.cpp.zig ui");
     context.setVsync(true);
-    context.data = try LlamaAppData.init(gpa.allocator());
+    context.data.mrt = try ModelRuntime.init(gpa.allocator());
     defer {
         if (!is_debug) {
             if (context.data.loader.thread) |t| {
@@ -379,7 +478,8 @@ pub fn main() !void {
                 context.data.loader.thread = null;
             }
         }
-        context.data.deinit();
+        context.data.mrt.?.deinit();
+        context.data.mrt = null;
     }
 
     const io = ig.igGetIO();

@@ -29,7 +29,7 @@ pub fn render(self: *Self, model: *llama.Model) !void {
     if (ig.igCheckbox("add_bos", &self.add_bos)) refresh = true;
     ig.igSameLine(0, 8);
     if (ig.igCheckbox("special", &self.special)) refresh = true;
-    const flags = ig.ImGuiInputTextFlags_CallbackResize | ig.ImGuiInputTextFlags_AllowTabInput | ig.ImGuiInputTextFlags_Multiline;
+    const flags = ig.ImGuiInputTextFlags_AllowTabInput | ig.ImGuiInputTextFlags_Multiline;
     ig.igPushItemWidth(-1);
 
     if (try ig.inputTextArrayList("##input", "Input text to tokenize here...", &self.input, flags))
