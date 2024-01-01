@@ -32,7 +32,7 @@ pub fn render(self: *Self, model: *llama.Model) !void {
     const flags = ig.ImGuiInputTextFlags_AllowTabInput | ig.ImGuiInputTextFlags_Multiline;
     ig.igPushItemWidth(-1);
 
-    if (try ig.inputTextArrayList("##input", "Input text to tokenize here...", &self.input, flags))
+    if (try ig.inputTextArrayList("##input", .{}, "Input text to tokenize here...", &self.input, flags))
         refresh = true;
 
     ig.igPopItemWidth();

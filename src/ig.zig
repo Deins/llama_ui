@@ -48,10 +48,10 @@ pub fn inputScalar(comptime T: type, label_txt: [:0]const u8, val: *T) bool {
     return inputScalarFull(T, label_txt, val, null, null, null, ig.ImGuiInputFlags_None);
 }
 
-pub fn inputTextArrayList(label_txt: [:0]const u8, hint: [:0]const u8, input: *std.ArrayList(u8), flags: ig.ImGuiInputTextFlags) !bool {
+pub fn inputTextArrayList(label_txt: [:0]const u8, size: ig.ImVec2, hint: [:0]const u8, input: *std.ArrayList(u8), flags: ig.ImGuiInputTextFlags) !bool {
     try input.ensureTotalCapacity(input.items.len + 1);
     input.allocatedSlice()[input.items.len] = 0; // ensure 0 termination
-    return (ig.igInputTextEx(label_txt, hint, input.items.ptr, @intCast(input.capacity), .{}, flags | ig.ImGuiInputTextFlags_CallbackResize, @ptrCast(&inputResizeCB), input));
+    return (ig.igInputTextEx(label_txt, hint, input.items.ptr, @intCast(input.capacity), size, flags | ig.ImGuiInputTextFlags_CallbackResize, @ptrCast(&inputResizeCB), input));
 }
 
 pub fn inputResizeCB(data: *ig.ImGuiInputTextCallbackData) callconv(.C) c_int {

@@ -50,11 +50,14 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
             self.history.clearRetainingCapacity();
         }
 
+        // ig.igPushStyleColor_U32(ig.ImGuiCol_ChildBg, 0xFFFFFFFF);
+        // defer ig.igPopStyleColor(1);
+        // _ = ig.igBeginChild_Str("##prompt_history_area", .{}, false, 0);
+        // defer ig.igEndChild();
+
         var tmp: [512]u8 = undefined;
         _ = tmp;
-        ig.igPushItemWidth(-1);
-        if (try ig.inputTextArrayList("##prompt_history", "", &self.history, ig.ImGuiInputTextFlags_ReadOnly | ig.ImGuiInputTextFlags_Multiline)) {}
-        ig.igPopItemWidth();
+        if (try ig.inputTextArrayList("##prompt_history", .{ .x = -1, .y = -1 }, "", &self.history, ig.ImGuiInputTextFlags_ReadOnly | ig.ImGuiInputTextFlags_Multiline)) {}
     }
     ig.igEnd();
 
@@ -70,7 +73,7 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
             ig.igSameLine(0, -1);
             ig.igPushItemWidth(150);
             defer ig.igPopItemWidth();
-            _ = try ig.inputTextArrayList("role", "role", &self.role, ig.ImGuiInputTextFlags_None);
+            _ = try ig.inputTextArrayList("role", .{}, "role", &self.role, ig.ImGuiInputTextFlags_None);
         }
 
         switch (mrt.state) {
@@ -92,7 +95,7 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
                 try input.ensureTotalCapacity(input.items.len + 1);
                 input.allocatedSlice()[input.items.len] = 0; // ensure 0 termination
                 const flags = ig.ImGuiInputTextFlags_Multiline | ig.ImGuiInputTextFlags_EnterReturnsTrue;
-                if (try ig.inputTextArrayList("##prompt_input", "Prompt input", input, flags)) {
+                if (try ig.inputTextArrayList("##prompt_input", .{ .y = -1 }, "Prompt input", input, flags)) {
                     if (mrt.prompt) |*prompt| {
                         try prompt.appendText(input.items, true);
                         try mrt.switchStateTo(.generating);
