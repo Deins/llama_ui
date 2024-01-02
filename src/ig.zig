@@ -104,3 +104,9 @@ pub fn spinner(label_txt: [:0]const u8, radius: f32, thickness: f32, color: ig.I
 
     ig.ImDrawList_PathStroke(draw_list, color, ig.ImDrawFlags_None, thickness);
 }
+
+pub fn getSpaceAvail() ig.ImVec2 {
+    var s: ig.ImVec2 = undefined;
+    ig.igGetContentRegionAvail(&s);
+    return s;
+}

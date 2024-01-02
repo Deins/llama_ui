@@ -11,7 +11,19 @@ history: std.ArrayList(u8),
 role: std.ArrayList(u8),
 input: std.ArrayList(u8),
 input_special: bool = true,
-input_templated: bool = true,
+template: Template = .raw,
+template_gen: ?llama.utils.TemplatedPrompt = null,
+submit_generate: bool = true,
+
+pub const Template = enum(c_int) {
+    raw,
+    chatml,
+    basic_chat,
+    alpaca,
+    custom,
+};
+
+pub const model_unavailable_label = "Model unavailable";
 
 pub fn init(alloc: std.mem.Allocator) !@This() {
     var role = std.ArrayList(u8).init(alloc);
@@ -41,12 +53,18 @@ pub fn updateHistory(self: *@This(), mrt: *ModelRuntime) !void {
 
 pub fn draw(self: *@This(), context: *AppContext) !void {
     const mrt = &context.data.mrt.?;
+    var gen = false;
+    if (mrt.prompt) |*prompt| {
+        prompt.tokens_mutex.lock();
+        defer prompt.tokens_mutex.unlock();
+        try self.updateHistory(&context.data.mrt.?);
+    }
 
     if (ig.igBegin("Prompt history", null, ig.ImGuiWindowFlags_None)) {
-        ig.text("History");
+        ig.igAlignTextToFramePadding();
         ig.igSameLine(0, -1);
         if (ig.igButton("clear", .{})) {
-            if (mrt.prompt) |*p| p.tokens.clearRetainingCapacity();
+            if (mrt.prompt) |*p| p.clearRetainingCapacity();
             self.history.clearRetainingCapacity();
         }
 
@@ -55,8 +73,6 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
         // _ = ig.igBeginChild_Str("##prompt_history_area", .{}, false, 0);
         // defer ig.igEndChild();
 
-        var tmp: [512]u8 = undefined;
-        _ = tmp;
         if (try ig.inputTextArrayList("##prompt_history", .{ .x = -1, .y = -1 }, "", &self.history, ig.ImGuiInputTextFlags_ReadOnly | ig.ImGuiInputTextFlags_Multiline)) {}
     }
     ig.igEnd();
@@ -66,47 +82,109 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
         ig.igSameLine(0, -1);
         //_ = ig.igCheckbox("templated", &mrt.input_templated);
 
-        var i: i32 = 0;
-        _ = ig.igCombo_Str("template", &i, "A\x00B\x00C\x00", -1);
+        ig.igPushItemWidth(100);
+        if (ig.igCombo_Str("template", @ptrCast(&self.template), "Raw\x00ChatML\x00Basic chat\x00Alpaca\x00Custom\x00", -1)) {
+            if (self.template_gen) |*tg| tg.deinit();
+            self.template_gen = null;
+            if (self.template != .raw) {
+                self.template_gen = llama.utils.TemplatedPrompt.init(
+                    self.input.allocator,
+                    switch (self.template) {
+                        .raw => unreachable,
+                        .chatml => llama.utils.TemplatedPrompt.template_chatml,
+                        .basic_chat => llama.utils.TemplatedPrompt.template_basic_chat,
+                        .alpaca => llama.utils.TemplatedPrompt.template_alpaca,
+                        .custom => .{}, // todo
+                    },
+                );
+            }
+        }
+        ig.igPopItemWidth();
 
-        if (self.input_templated) {
+        if (self.template != .raw) {
             ig.igSameLine(0, -1);
             ig.igPushItemWidth(150);
             defer ig.igPopItemWidth();
             _ = try ig.inputTextArrayList("role", .{}, "role", &self.role, ig.ImGuiInputTextFlags_None);
         }
+        ig.igSameLine(0, -1);
+        _ = ig.igCheckbox("gen on submit", &self.submit_generate);
+        if (ig.igIsItemHovered(ig.ImGuiHoveredFlags_DelayShort) and ig.igBeginTooltip()) {
+            ig.text("Start generating on submit, otherwise has to be called manually.");
+            ig.igEndTooltip();
+        }
+        ig.igSameLine(0, -1);
+        if (ig.igButton("generate", .{})) {
+            if (mrt.state != .ready) ig.igOpenPopup_Str(model_unavailable_label, ig.ImGuiPopupFlags_NoOpenOverExistingPopup) else gen = true;
+        }
 
         switch (mrt.state) {
             .generating => {
-                const r = 16;
+                const r = 12;
                 var aspace: ig.ImVec2 = .{};
                 ig.igGetContentRegionAvail(&aspace);
                 ig.igSetCursorPosX(aspace.x / 2 - r);
-                ig.spinner("##GeneratingSpinner", r, 6, 0xFFFFFFAA);
+                ig.spinner("##GeneratingSpinner", r, 4, 0xFFFFFFAA);
                 context.setAnimationFrames(0.05);
                 const w = 100;
                 ig.igSetCursorPosX(aspace.x / 2 - w / 2);
                 if (ig.igButton("cancel", .{ .x = w, .y = 32 })) mrt.gen_state.store(.stopping, .Monotonic);
             },
-            .ready => {
+            else => {
                 ig.igPushItemWidth(-1);
                 defer ig.igPopItemWidth();
                 const input = &self.input;
                 try input.ensureTotalCapacity(input.items.len + 1);
                 input.allocatedSlice()[input.items.len] = 0; // ensure 0 termination
                 const flags = ig.ImGuiInputTextFlags_Multiline | ig.ImGuiInputTextFlags_EnterReturnsTrue;
-                if (try ig.inputTextArrayList("##prompt_input", .{ .y = -1 }, "Prompt input", input, flags)) {
-                    if (mrt.prompt) |*prompt| {
-                        try prompt.appendText(input.items, true);
-                        try mrt.switchStateTo(.generating);
-                        input.clearRetainingCapacity();
+                if (try ig.inputTextArrayList("##prompt_input", .{ .y = -1 }, "Prompt input\nCtrl+Enter to submit", input, flags)) {
+                    if (mrt.state != .ready)
+                        ig.igOpenPopup_Str(model_unavailable_label, ig.ImGuiPopupFlags_NoOpenOverExistingPopup)
+                    else {
+                        self.history_tokens += 12345; // fake value just to force reloading
+                        if (mrt.prompt) |*prompt| {
+                            if (self.template_gen) |*tg| {
+                                defer tg.clearRetainingCapacity();
+                                try tg.add(self.role.items, input.items);
+                                try prompt.appendText(tg.text.items, true);
+                            } else try prompt.appendText(input.items, true);
+
+                            input.clearRetainingCapacity();
+                            if (self.submit_generate) gen = true;
+                        }
                     }
                 }
             },
-            else => ig.igText("Model has not been loaded"),
+        }
+
+        if (gen) {
+            if (self.template_gen) |*tg| {
+                defer tg.clearRetainingCapacity();
+                try tg.add("assistant", "{{generate}}");
+                try mrt.prompt.?.appendText(tg.text.items, true);
+            }
+            try mrt.switchStateTo(.generating);
         }
     }
-    ig.igEnd();
 
-    //igText("Input");
+    // popup rendering (closed by default)
+    var center: ig.ImVec2 = undefined;
+    ig.ImGuiViewport_GetCenter(&center, ig.igGetMainViewport());
+    ig.igSetNextWindowPos(center, ig.ImGuiCond_Always, .{ .x = 0.5, .y = 0.5 });
+    if (ig.igBeginPopupModal(model_unavailable_label, null, ig.ImGuiWindowFlags_AlwaysAutoResize | ig.ImGuiWindowFlags_NoSavedSettings | ig.ImGuiWindowFlags_NoMove)) {
+        const bw = 120;
+        switch (mrt.state) {
+            .unloaded => ig.text("Model has not been loaded.\nLoad model first (see config section)"),
+            .loading, .unloading => ig.text("Model is still loading"),
+            .generating => {
+                ig.text("Model is still generating");
+                ig.igSetCursorPosX(ig.getSpaceAvail().x / 2 - bw / 2);
+                if (ig.igButton("Stop generating", .{ .x = bw })) mrt.gen_state.store(.stopping, .Monotonic);
+            },
+            .ready => {},
+        }
+        ig.igSetCursorPosX(ig.getSpaceAvail().x / 2 - bw / 2);
+        if (ig.igButton("ok", .{ .x = bw })) ig.igCloseCurrentPopup();
+        ig.igEndPopup();
+    }
 }

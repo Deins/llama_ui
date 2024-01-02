@@ -146,12 +146,6 @@ pub const ModelRuntime = struct {
                 if (done) try self.switchStateTo(.unloaded);
             },
             .generating => {
-                {
-                    const prompt = &self.prompt.?;
-                    prompt.tokens_mutex.lock();
-                    defer prompt.tokens_mutex.unlock();
-                    try self.prompt_ui.updateHistory(self);
-                }
                 if (self.gen_state.load(.Acquire) == .stopped) try self.switchStateTo(.ready);
             },
         }
