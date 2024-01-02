@@ -7,6 +7,7 @@ const slog = std.log.scoped(.main);
 const TokUi = @import("tokenizer_ui.zig");
 const Atomic = std.atomic.Atomic;
 const PromptUi = @import("prompt_ui.zig");
+const nfd = @import("nfd");
 
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 
@@ -293,6 +294,13 @@ pub fn main() !void {
         slog.info("llama_system_info: {s}", .{llama.printSystemInfo()});
         llama.logSet(llama.utils.scopedLog, null);
     }
+
+    const nfd_status = nfd.NFD_Init();
+    if (nfd_status != nfd.NFD_OKAY) {
+        std.log.err("NFD file dialog initialization error: {s}", .{nfd.NFD_GetError()});
+        return error.NFD_INIT_FAILED;
+    }
+    defer nfd.NFD_Quit();
 
     var context = try LlamaApp.begin(gpa.allocator());
     defer if (do_cleanup) context.deinit();

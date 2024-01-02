@@ -52,7 +52,7 @@ pub fn build(b: *std.Build) !void {
             exe.linkSystemLibraryNeeded("Ole32");
         },
         .linux => {
-            const nfd_portal = b.addUserInputFlag("nfd_portal") catch false;
+            const nfd_portal = b.option(bool, "nfd_portal", "Linux, use the portal implementation instead of GTK") orelse false;
             if (nfd_portal) exe.addCSourceFile(.{ .file = .{ .path = "libs/native_file_dialog/src/nfd_portal.cpp" }, .flags = &.{} }) else exe.addCSourceFile(.{ .file = .{ .path = "libs/native_file_dialog/src/nfd_gtk.cpp" }, .flags = &.{} });
         },
         .macos => exe.addCSourceFile(.{ .file = .{ .path = "libs/native_file_dialog/src/nfd_cocoa.cpp" }, .flags = &.{} }),
