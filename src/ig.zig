@@ -19,8 +19,14 @@ pub inline fn label(label_txt: []const u8, v: anytype) void {
     labelFmt(label_txt, v, "{}");
 }
 
-pub inline fn text(txt: [:0]const u8) void {
+pub inline fn text(txt: []const u8) void {
     ig.igTextUnformatted(txt.ptr, @ptrFromInt(@intFromPtr(txt.ptr) + txt.len));
+}
+
+pub fn textFmt(comptime buf_size: usize, comptime fmt: []const u8, args: anytype) void {
+    var buf: [buf_size]u8 = undefined;
+    const slice: []u8 = std.fmt.bufPrint(&buf, fmt, args) catch buf[0..];
+    text(slice);
 }
 
 pub fn inputScalarFull(comptime T: type, label_txt: [:0]const u8, val: *T, step_: ?T, step_fast_: ?T, format: [*c]const u8, flags: ig.ImGuiInputTextFlags) bool {

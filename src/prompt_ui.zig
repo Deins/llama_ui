@@ -62,6 +62,7 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
 
     if (ig.igBegin("Prompt history", null, ig.ImGuiWindowFlags_None)) {
         ig.igAlignTextToFramePadding();
+        ig.textFmt(64, "{}/{}", .{ if (mrt.prompt) |p| p.tokens.items.len else 0, if (mrt.model_ctx) |c| c.nCtx() else 0 });
         ig.igSameLine(0, -1);
         if (ig.igButton("clear", .{})) {
             if (mrt.prompt) |*p| p.clearRetainingCapacity();
@@ -181,7 +182,7 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
                 ig.igSetCursorPosX(ig.getSpaceAvail().x / 2 - bw / 2);
                 if (ig.igButton("Stop generating", .{ .x = bw })) mrt.gen_state.store(.stopping, .Monotonic);
             },
-            .ready => {},
+            .ready => ig.igCloseCurrentPopup(),
         }
         ig.igSetCursorPosX(ig.getSpaceAvail().x / 2 - bw / 2);
         if (ig.igButton("ok", .{ .x = bw })) ig.igCloseCurrentPopup();
