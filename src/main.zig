@@ -110,6 +110,15 @@ pub const ModelRuntime = struct {
         if (self.model_path) |pth| self.alloc.free(pth);
     }
 
+    pub fn recreateCtx(self: *@This()) !void {
+        if (self.model_ctx) |ctx| ctx.deinit() else return;
+        self.model_ctx = try llama.Context.initWithModel(self.model.?, self.cparams);
+        if (self.prompt) |*prompt| {
+            prompt.ctx = self.model_ctx.?;
+            prompt.invalidate();
+        }
+    }
+
     pub fn updateState(self: *@This()) !void {
         switch (self.state) {
             .unloaded => {
@@ -189,6 +198,7 @@ pub const ModelRuntime = struct {
                 if (self.loader.result.swap(null, .AcqRel)) |m| m.deinit();
                 if (self.prompt) |*p| {
                     // TODO: keep text, reembed after reloading?
+                    // prompt could detokenized before unloading, and then restored from text form once new model is loaded
                     p.deinit();
                     self.prompt = null;
                 }
@@ -226,7 +236,11 @@ pub const ModelRuntime = struct {
             const model = self.model.?;
             const eos = model.tokenEos();
             while (self.gen_state.load(.Acquire) == .working) {
-                const tok = prompt.generateAppendOne() catch unreachable; // TODO: handle OOM
+                const tok = prompt.generateAppendOne() catch |err| {
+                    // TODO: review if this error should be exposed as popup, etc
+                    slog.err("gen thread: encountered decode error: {}; HALT!", .{err});
+                    break;
+                };
                 if (tok == eos) break;
             }
         } else unreachable;
@@ -277,10 +291,10 @@ pub fn renderTick(context: *LlamaApp.Context) !void {
         try @import("config_ui.zig").configWindow(context);
         try mrt.prompt_ui.draw(context);
 
+        defer ig.igEnd();
         if (ig.igBegin("Tokenizer tool", null, ig.ImGuiWindowFlags_NoFocusOnAppearing)) {
             if (mrt.model) |m| try mrt.tok_ui.render(m) else ig.text("Model not loaded.");
         }
-        ig.igEnd();
     }
 }
 

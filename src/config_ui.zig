@@ -13,6 +13,8 @@ pub fn configWindow(context: *AppContext) !void {
     const mrt: *ModelRuntime = &context.data.mrt.?; // context data
     var tmp: [512]u8 = undefined;
     ig.igSetNextWindowSizeConstraints(.{ .x = 300, .y = 128 }, .{ .x = 9999999, .y = 9999999 }, null, null);
+
+    defer ig.igEnd();
     if (ig.igBegin("Config", null, ig.ImGuiWindowFlags_NoFocusOnAppearing)) {
         ig.igPushItemWidth(200);
         defer ig.igPopItemWidth();
@@ -142,7 +144,7 @@ pub fn configWindow(context: *AppContext) !void {
             // bool offload_kqv; // whether to offload the KQV ops (including the KV cache) to GPU
             if (ig.igCheckbox("offload_kqv", &p.offload_kqv)) mod = true;
 
-            // TODO: if (mod) something something
+            if (mod) try mrt.recreateCtx();
         }
         if (ig.igCollapsingHeader_BoolPtr("App config", null, ig.ImGuiTreeNodeFlags_None)) {
             ig.igSeparatorText("debug");
@@ -157,7 +159,6 @@ pub fn configWindow(context: *AppContext) !void {
             ig.text(if (mrt.target_state) |ts| @tagName(ts) else "<none>");
         }
     }
-    ig.igEnd();
     if (show_im_demo) ig.igShowDemoWindow(null);
 }
 

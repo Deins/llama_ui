@@ -54,20 +54,24 @@ pub fn updateHistory(self: *@This(), mrt: *ModelRuntime) !void {
 pub fn draw(self: *@This(), context: *AppContext) !void {
     const mrt = &context.data.mrt.?;
     var gen = false;
-    if (mrt.prompt) |*prompt| {
-        prompt.tokens_mutex.lock();
-        defer prompt.tokens_mutex.unlock();
-        try self.updateHistory(&context.data.mrt.?);
+    const model_available = mrt.model != null;
+    if (model_available) {
+        if (mrt.prompt) |*prompt| {
+            prompt.tokens_mutex.lock();
+            defer prompt.tokens_mutex.unlock();
+            try self.updateHistory(&context.data.mrt.?);
+        }
     }
 
+    defer ig.igEnd();
     if (ig.igBegin("Prompt history", null, ig.ImGuiWindowFlags_None)) {
-        ig.igAlignTextToFramePadding();
-        ig.textFmt(64, "{}/{}", .{ if (mrt.prompt) |p| p.tokens.items.len else 0, if (mrt.model_ctx) |c| c.nCtx() else 0 });
-        ig.igSameLine(0, -1);
         if (ig.igButton("clear", .{})) {
             if (mrt.prompt) |*p| p.clearRetainingCapacity();
             self.history.clearRetainingCapacity();
         }
+        ig.igSameLine(0, -1);
+        ig.igAlignTextToFramePadding();
+        ig.textFmt(64, "prompt: {} context: {}/{}", .{ if (mrt.prompt) |p| p.tokens.items.len else 0, if (mrt.prompt) |p| p.ctx_used else 0, if (mrt.model_ctx) |c| c.nCtx() else 0 });
 
         // ig.igPushStyleColor_U32(ig.ImGuiCol_ChildBg, 0xFFFFFFFF);
         // defer ig.igPopStyleColor(1);
@@ -76,8 +80,8 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
 
         if (try ig.inputTextArrayList("##prompt_history", .{ .x = -1, .y = -1 }, "", &self.history, ig.ImGuiInputTextFlags_ReadOnly | ig.ImGuiInputTextFlags_Multiline)) {}
     }
-    ig.igEnd();
 
+    defer ig.igEnd();
     if (ig.igBegin("Prompt input", null, ig.ImGuiWindowFlags_None)) {
         _ = ig.igCheckbox("special tokens", &self.input_special);
         ig.igSameLine(0, -1);
