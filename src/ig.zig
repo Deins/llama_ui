@@ -32,10 +32,10 @@ pub fn textFmt(comptime buf_size: usize, comptime fmt: []const u8, args: anytype
 pub fn inputScalarFull(comptime T: type, label_txt: [:0]const u8, val: *T, step_: ?T, step_fast_: ?T, format: [*c]const u8, flags: ig.ImGuiInputTextFlags) bool {
     const igt = switch (@typeInfo(T)) {
         .Int => |it| switch (it.bits) {
-            8 => if (it.signedness == .signed) ig.ImGuiDataType_I8 else ig.ImGuiDataType_U8,
-            16 => if (it.signedness == .signed) ig.ImGuiDataType_I16 else ig.ImGuiDataType_U16,
-            32 => if (it.signedness == .signed) ig.ImGuiDataType_I32 else ig.ImGuiDataType_U32,
-            64 => if (it.signedness == .signed) ig.ImGuiDataType_I64 else ig.ImGuiDataType_U64,
+            8 => if (it.signedness == .signed) ig.ImGuiDataType_S8 else ig.ImGuiDataType_U8,
+            16 => if (it.signedness == .signed) ig.ImGuiDataType_S16 else ig.ImGuiDataType_U16,
+            32 => if (it.signedness == .signed) ig.ImGuiDataType_S32 else ig.ImGuiDataType_U32,
+            64 => if (it.signedness == .signed) ig.ImGuiDataType_S64 else ig.ImGuiDataType_U64,
             else => unreachable,
         },
         .Float => |ft| switch (ft.bits) {
@@ -115,4 +115,8 @@ pub fn getSpaceAvail() ig.ImVec2 {
     var s: ig.ImVec2 = undefined;
     ig.igGetContentRegionAvail(&s);
     return s;
+}
+
+pub inline fn igCombo(label_: [*c]const u8, current_item: [*c]c_int, items: []const [*:0]const u8, popup_max_height_in_items: c_int) bool {
+    return ig.igCombo_Str_arr(label_, current_item, items.ptr, @intCast(items.len), popup_max_height_in_items);
 }

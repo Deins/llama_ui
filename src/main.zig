@@ -86,6 +86,8 @@ pub const ModelRuntime = struct {
     prompt_ui: PromptUi,
     gen_state: Atomic(WorkerState) = .{ .value = .stopped },
     prompt: ?llama.Prompt = null,
+    /// local copy just for ui
+    prompt_ctx_extension: llama.Prompt.ContextExtensionStrategy = llama.Prompt.ContextExtensionStrategy.none,
 
     pub fn init(alloc: std.mem.Allocator) !@This() {
         return .{
@@ -134,6 +136,7 @@ pub const ModelRuntime = struct {
                         .model = self.model.?,
                         .ctx = self.model_ctx.?,
                         .batch_size = self.cparams.n_batch,
+                        .ctx_extension = self.prompt_ctx_extension,
                     });
                     done = true;
                 } else if (lstate != .loading) done = true;
@@ -299,8 +302,7 @@ pub fn renderTick(context: *LlamaApp.Context) !void {
 }
 
 pub fn main() !void {
-    const is_debug = (builtin.mode == .Debug);
-    const do_cleanup = is_debug; // speed up program exit, by skipping cleanup, works as long as all threads are deatached
+    const do_cleanup = builtin.mode != .ReleaseFast; // speed up program exit, by skipping cleanup, works as long as all threads are deatached
     defer if (gpa.deinit() == .leak) @panic("Memory leak detected!");
     { // llama
         llama.Backend.init(false);

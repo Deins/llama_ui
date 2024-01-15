@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const ig = @import("ig.zig");
 const main = @import("main.zig");
 const nfd = @import("nfd");
+const llama = @import("llama");
 
 const AppContext = main.AppContext;
 const ModelRuntime = main.ModelRuntime;
@@ -123,6 +124,43 @@ pub fn configWindow(context: *AppContext) !void {
         if (ig.igCollapsingHeader_BoolPtr("Context config", null, ig.ImGuiTreeNodeFlags_DefaultOpen)) {
             const p = &mrt.cparams;
             var mod = false;
+            { // context extenison
+                if (mrt.prompt) |prompt| mrt.prompt_ctx_extension = prompt.ctx_extension;
+                const TagType = std.meta.Tag(llama.Prompt.ContextExtensionStrategy);
+                var tag: TagType = mrt.prompt_ctx_extension;
+                var str_arr: []const [*:0]const u8 = comptime blk: {
+                    const tags = std.meta.tags(TagType);
+                    var str_arr: [tags.len][*:0]const u8 = undefined;
+                    for (0..tags.len) |i| str_arr[i] = @tagName(tags[i]);
+                    break :blk &str_arr;
+                };
+                const combo_mod = ig.igCombo("Context extension", @ptrCast(&tag), str_arr, -1);
+                if (combo_mod) {
+                    switch (tag) {
+                        .none => mrt.prompt_ctx_extension = TagType.none,
+                        .sliding_window => mrt.prompt_ctx_extension = TagType.sliding_window,
+                        .shifting => mrt.prompt_ctx_extension = .{ .shifting = .{} },
+                        .self_extend => mrt.prompt_ctx_extension = .{ .self_extend = .{} },
+                    }
+                }
+
+                // extension params
+                switch (mrt.prompt_ctx_extension) {
+                    .none => {},
+                    .sliding_window => {},
+                    .shifting => |*cfg| {
+                        _ = (ig.inputScalar(usize, "keep_first_n", &cfg.keep_first_n));
+                    },
+                    .self_extend => |*cfg| {
+                        _ = (ig.inputScalar(i32, "i", &cfg.i));
+                        _ = (ig.inputScalar(i32, "n", &cfg.n));
+                        _ = (ig.inputScalar(i32, "w", &cfg.w));
+                    },
+                }
+                if (mrt.prompt) |*prompt| prompt.ctx_extension = mrt.prompt_ctx_extension;
+                ig.igSeparator();
+            }
+
             _ = (ig.inputScalar(u32, "seed", &p.seed));
             if (ig.inputScalar(u32, "n_ctx", &p.n_ctx)) mod = true;
             if (ig.inputScalar(u32, "n_batch", &p.n_batch)) mod = true;

@@ -88,7 +88,7 @@ pub fn draw(self: *@This(), context: *AppContext) !void {
         //_ = ig.igCheckbox("templated", &mrt.input_templated);
 
         ig.igPushItemWidth(100);
-        if (ig.igCombo_Str("template", @ptrCast(&self.template), "Raw\x00ChatML\x00Basic chat\x00Alpaca\x00Custom\x00", -1)) {
+        if (ig.igCombo("template", @ptrCast(&self.template), &.{ "Raw", "ChatML", "Basic chat", "Alpaca", "Custom" }, -1)) {
             if (self.template_gen) |*tg| tg.deinit();
             self.template_gen = null;
             if (self.template != .raw) {
