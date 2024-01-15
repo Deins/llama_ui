@@ -1,2 +1,4 @@
 # llama_ui
-Llama.cpp.zig UI
+Llama.cpp.zig debug UI
+
+<img src="assets/screenshot.png">
